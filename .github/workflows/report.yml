@@ -1,0 +1,79 @@
+name: Report deploy result
+run-name: Report ${{ inputs.mode }} ${{ inputs.result }} on ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha: {required: true, type: string}
+      mode: {required: true, type: choice, options: [status, legacy_check]}
+      result: {required: true, type: choice, options: [success, failure, cancelled]}
+jobs:
+  # PR #6681 的 report_deploy_result script，原封不動
+  report_status:
+    if: inputs.mode == 'status'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          NEEDS: '{"resolve_deploy_target":{"result":"success"},"deploy_backend":{"result":"${{ inputs.result }}"}}'
+          SHA: ${{ inputs.sha }}
+        with:
+          script: |
+            const { resolve_deploy_target: _, ...deployJobs } = JSON.parse(process.env.NEEDS);
+            const results = Object.values(deployJobs).map(job => job.result);
+            const conclusion = results.every(result => result === 'success')
+              ? 'success'
+              : results.includes('cancelled') ? 'cancelled' : 'failure';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // 各 job 的結果只留在 log；commit status 的 description 上限 140 字元，放不下。
+            core.info(Object.entries(deployJobs).map(([name, job]) => `- ${name}: ${job.result}`).join('\n'));
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.SHA,
+              context: 'deploy_staging_live_success',
+              // commit status 沒有 cancelled，取消也算沒部署成功。
+              state: conclusion === 'success' ? 'success' : conclusion === 'cancelled' ? 'error' : 'failure',
+              target_url: runUrl,
+              description: conclusion === 'success' ? '已部署到 staging' : `部署結果：${conclusion}`,
+            });
+            core.notice(`${process.env.SHA.slice(0, 7)} 的 deploy_staging_live_success：${conclusion}`);
+
+  # 對照組：staging 目前的 check run 寫法，原封不動
+  report_legacy_check:
+    if: inputs.mode == 'legacy_check'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          NEEDS: '{"resolve_deploy_target":{"result":"success"},"deploy_backend":{"result":"${{ inputs.result }}"}}'
+          SHA: ${{ inputs.sha }}
+        with:
+          script: |
+            const { resolve_deploy_target: _, ...deployJobs } = JSON.parse(process.env.NEEDS);
+            const results = Object.values(deployJobs).map(job => job.result);
+            const conclusion = results.every(result => result === 'success')
+              ? 'success'
+              : results.includes('cancelled') ? 'cancelled' : 'failure';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // GITHUB_TOKEN 建的 check 會忽略 details_url，部署 run 的連結放在 summary。
+            const { data: check } = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'deploy_staging_live_success',
+              head_sha: process.env.SHA,
+              status: 'completed',
+              conclusion,
+              output: {
+                title: conclusion === 'success' ? '已部署到 staging' : `部署結果：${conclusion}`,
+                summary: [
+                  `部署 run：${runUrl}`,
+                  ...Object.entries(deployJobs).map(([name, job]) => `- ${name}: ${job.result}`),
+                ].join('\n'),
+              },
+            });
+            core.notice(`${process.env.SHA.slice(0, 7)} 的 deploy_staging_live_success：${conclusion}（${check.html_url}）`);
+

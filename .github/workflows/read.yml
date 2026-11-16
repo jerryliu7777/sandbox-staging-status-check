@@ -1,0 +1,69 @@
+name: Read deploy result
+run-name: Read on ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha: {required: true, type: string}
+jobs:
+  # PR #6681 resolve_deploy_target 的權限與讀取邏輯
+  resolve_reader:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      statuses: read
+      pull-requests: read
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          SHA: ${{ inputs.sha }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const isManual = false;
+            const sha = process.env.SHA;
+            const short = sha.slice(0, 7);
+            const skip = (reason) => core.notice(`RESOLVE: 不部署：${reason}`);
+            // report_deploy_result 寫在部署 commit 上的 commit status；同一個 context 寫過多次時，
+            // combined status 只回最新一筆。
+            const deployStatusOf = async (ref) => {
+              const { data } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref, per_page: 100 });
+              return data.statuses.find(s => s.context === 'deploy_staging_live_success');
+            };
+            const deploySucceeded = async (ref) => (await deployStatusOf(ref))?.state === 'success';
+
+            core.notice(`RESOLVE: deploySucceeded=${await deploySucceeded(sha)}`);
+            const run = async () => {
+            if (!isManual) {
+              const last = await deployStatusOf(sha);
+              if (last?.state === 'success') {
+                skip(`${short} 已經部署過`);
+                return;
+              }
+              if (['failure', 'error'].includes(last?.state)) {
+                skip(`${short} 上一輪部署結果是 ${last.state}，請確認後手動執行：${last.target_url}`);
+                return;
+              }
+            }
+
+
+            core.notice('RESOLVE: 會部署（沒有成功或失敗的紀錄）');
+            };
+            await run();
+  # PR #6681 schedule-auto-merge 的權限與查詢
+  automerge_reader:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      statuses: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          RESULT=$(gh api "repos/$REPO/commits/$SHA/status?per_page=100" \
+                --jq '[.statuses[] | select(.context == "deploy_staging_live_success")][0].state // empty')
+          echo "::notice::AUTOMERGE: RESULT=[$RESULT]"

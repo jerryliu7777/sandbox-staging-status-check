@@ -1,0 +1,7 @@
+name: Delete branch created resources
+on: delete
+jobs:
+  delete_resources:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deleted ${{ github.event.ref }} (runs on default branch HEAD ${{ github.sha }})"
